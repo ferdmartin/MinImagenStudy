@@ -28,7 +28,7 @@ class Identity(nn.Module):
     """
     def __init__(self, *args, **kwargs):
         super().__init__()
-    def forward(self, x: torch.tensor, *args, **kwargs) -> torhc.tensor:
+    def forward(self, x: torch.tensor, *args, **kwargs) -> torch.tensor:
         return x
 
 class Attention(nn.Module):
@@ -98,7 +98,7 @@ class Attention(nn.Module):
 
 class Block(nn.Module):
     """
-    Sub-block for .ResnetBlock
+    Sub-block for ResnetBlock
     """
     def __init__(self, dim: int, dim_out: int, groups: int = 8, norm: bool = True):
         super().__init__()
@@ -187,3 +187,69 @@ class CrossAttention(nn.Module):
             out = einsum('b h i j, b h j d -> b h i d', attn, v)
             out = rearrange(out, 'b h n d -> b n (h d)')
             return self.to_out(out)
+
+class CrossEmbedLayer(nn.Module):
+    """
+    Module performing cross-embedding on an input image, like an inception module, and keeping channel depth.
+    """
+    def __init__(self, dim_in: int, kernel_sizes: tuple[int, ...], dim_out: int = None, stride: int = 2):
+        super().__init__()
+        assert all([*map(lambda t: (t%2)== (stride%2), kernel_sizes)]) #ensuring stride and kernels are either all odd or all even
+
+        dim_out = default(dim_out, dim_in)
+        kernel_sizes = sorted(kernel_sizes) # sort kernels by size
+        num_scales = len(kernel_sizes) # number of kernels
+        
+        # check number of filters for each kernel. We sum them to dim_out and be descending with kernel size
+        dim_scales = [int(dim_out / (2**i)) for i in range(1, num_scales)]
+        dim_scales = [*dim_scales, dim_out - sum(dim_scales)]
+
+        # createthe convolution objects
+        self.convs - nn.ModuleList([])
+        for kernel, dim_scale in zip(kernel_sizes, dim_scales):
+            self.convs.append(nn.Conv2d(dim_in, dim_scale, kernel, stride=stride, padding=(kernel - stride) // 2))
+        
+    def forward(self, x: torch.tensor) -> torch.tensor:
+        # Perform each convolution and concatenate the outputs along the channel dim
+        fmaps = tuple(map(lambda conv: conv(x), self.convs))
+        return torch.cat(fmaps, dim=1)
+    
+def Downsample(dim: int, dim_out: int = None) -> torch.nn.Conv2d:
+    """
+    Return a convolutional layer that cuts the spatial dimensions of an image in half and potentially modifies the number of channels
+    """    
+    dim_out = default(dim_out, dim)
+    return nn.Conv2d(dim, dim_out, kernel_size=4, stride=2, padding=1)
+
+def Upsample(dim: int, dim_out: int = None) -> torch.nn.Sequential:
+    """
+    Returns sequential module upsampling twice the spatial width with an nn.Upsample
+    """
+    dim_out = default(dim_out, dim)
+
+    return nn.Sequential(
+        nn.Upsample(scale_factor=2, mode="nearest"),
+        nn.Conv2d(dim, dim_out, 3, padding=1)
+        )
+
+class Parallel(nn.Module):
+    """
+    Passes input through parallel functions and then sums the result.
+    """
+    def __init__(self, *fns: tuple[Callable, ...]):
+        super().__init__()
+        self.fns = nn.ModuleList(fns)
+    
+    def forward(self, x: torch.tensor) -> torch.tensor:
+        outputs = [fn(x) for fn in self.fns]
+        return sum(outputs)
+    
+class Residual(nn.Module):
+    """
+    Passes input through a function and then adds the output to input
+    """
+    def __init__(self, fn: callable):
+        super().__init__()
+        self.fn = fn
+    def forward(self, x: torch.tensor, **kwargs) -> torch.tensor:
+        return self.fn(x, **kwargs) + x
